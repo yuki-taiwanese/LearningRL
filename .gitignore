@@ -10,6 +10,9 @@ dist/
 .ruff_cache/
 .pytest_cache/
 .mypy_cache/
+.local-check-tmp/
+.gitman-cache/
+box_transfer_scene.png
 
 # --- Environments --------------------------------------------------------------
 .venv/

@@ -17,18 +17,14 @@ Commands are clipped to the ranges `config.yaml` exports for the term. Driving
 a policy outside the envelope it was trained in is not a sim2sim finding, it
 is an out-of-distribution query, and the clip keeps the two apart.
 
-No new dependency: `termios` and `select` are standard library, which also
-means the whole interactive path runs on a CPU-only host with no container.
+No new dependency: Windows uses `msvcrt`; POSIX uses `termios` and `select`.
 """
 
 from __future__ import annotations
 
 import os
-import select
 import sys
-import termios
 import threading
-import tty
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -36,6 +32,14 @@ import numpy as np
 from LearningRLsim.commands.sources import CommandSource, Event
 from LearningRLsim.commands.terms import CommandTerm, wrap_to_pi
 from LearningRLsim.runconfig import RunConfig
+
+WINDOWS = os.name == "nt"
+if WINDOWS:
+    import msvcrt
+else:
+    import select
+    import termios
+    import tty
 
 if TYPE_CHECKING:
     from LearningRLsim.context import EvalContext
@@ -66,6 +70,13 @@ BINDINGS = """
 
 class KeyboardError(RuntimeError):
     """The keyboard cannot be used for this run."""
+
+
+def _windows_key() -> str:
+    key = msvcrt.getwch()
+    if key in ("\x00", "\xe0"):
+        return {"H": "w", "P": "s", "K": "q", "M": "e"}.get(msvcrt.getwch(), "")
+    return key
 
 
 class KeyboardSource(CommandSource):
@@ -157,22 +168,29 @@ class KeyboardSource(CommandSource):
 
     # -- the reader thread ---------------------------------------------------
     def _start(self) -> None:
-        self._saved = termios.tcgetattr(self._fd)
-        # cbreak, not raw: ISIG survives, so Ctrl-C still interrupts a rollout
-        # that has run away -- which is the one key binding nobody should have
-        # to look up.
-        tty.setcbreak(self._fd)
+        if not WINDOWS:
+            self._saved = termios.tcgetattr(self._fd)
+            # cbreak, not raw: ISIG survives, so Ctrl-C still interrupts a rollout
+            # that has run away -- which is the one key binding nobody should have
+            # to look up.
+            tty.setcbreak(self._fd)
         print(f"[LearningRLsim] keyboard driving '{self._term_name}':{BINDINGS}")
         self._thread = threading.Thread(target=self._read_loop, name="LearningRLsim-keyboard", daemon=True)
         self._thread.start()
 
     def _restore(self) -> None:
-        if self._saved is not None:
+        if not WINDOWS and self._saved is not None:
             termios.tcsetattr(self._fd, termios.TCSADRAIN, self._saved)
             self._saved = None
 
     def _read_loop(self) -> None:
         while not self._stop.is_set():
+            if WINDOWS:
+                if not msvcrt.kbhit():
+                    self._stop.wait(POLL_INTERVAL)
+                    continue
+                self.press(_windows_key())
+                continue
             if not select.select([self._fd], [], [], POLL_INTERVAL)[0]:
                 continue
             key = os.read(self._fd, 1).decode("utf-8", "replace")
