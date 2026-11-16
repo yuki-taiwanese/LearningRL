@@ -205,3 +205,118 @@ def test_open_box_panels_have_expected_volume():
     x, y, z = L.box_size
     t = L.wall
     assert volume == pytest.approx(x * y * z - (x - 2 * t) * (y - 2 * t) * (z - t))
+
+
+def round_trip_data(data, index=0):
+    d = {key: value.clone() for key, value in data.items()}
+    d["size"] = torch.tensor([L.box_sizes[index]])
+    d["box"] = torch.tensor([L.sources[index]])
+    d["dest"] = torch.tensor([L.destinations[index]])
+    d["source_stand"] = torch.tensor([L.source_stands[index]])
+    d["dest_stand"] = torch.tensor([L.destination_stands[index]])
+    d["root"] = d["source_stand"] + torch.tensor([[0, 0, 0.75]])
+    width = L.box_sizes[index][1]
+    d["hands"] = d["box"][:, None] + torch.tensor([[[-0.03, width / 2 + 0.025, 0], [-0.03, -width / 2 - 0.025, 0]]])
+    d["grasp"] = d["hands"].clone()
+    d["home"] = torch.tensor([L.home])
+    d["all_supported"] = torch.tensor([[index == 1, False]])
+    d["any_box_failed"] = torch.tensor([False])
+    d["all_hand_force"] = torch.zeros(1, 2, 2)
+    d["all_hand_force"][:, index] = 1
+    return d
+
+
+def deliver(state, data):
+    index = state.box_index.item()
+    tick(state, data, 0.28)
+    tick(state, data, 0.16)
+    move_box(data, data["box"] + torch.tensor([[0, 0, 0.11]]))
+    tick(state, data, 0.16)
+    data["root"][:, :2] = data["dest_stand"][:, :2]
+    move_box(data, data["dest"] + torch.tensor([[0, 0, 0.11]]))
+    tick(state, data, 0.16)
+    move_box(data, data["dest"])
+    data["support_force"][:] = L.box_masses[index] * 9.81
+    data["all_supported"][:, index] = True
+    tick(state, data, 0.28)
+    data["hands"] += torch.tensor([[[0, 0.2, 0], [0, -0.2, 0]]])
+    data["hand_force"][:] = 0
+    data["all_hand_force"][:] = 0
+    tick(state, data, 1.02)
+    assert state.phase.item() == index * 7 + 6
+
+
+def test_two_sizes_fit_both_tables_without_overlap():
+    assert all(big > small for big, small in zip(L.large_box_size, L.box_size))
+    for centers in (L.sources, L.destinations):
+        table = torch.tensor([[L.table_x, L.table_y if centers == L.sources else -L.table_y, 0]])
+        for position, size in zip(centers, L.box_sizes):
+            points = core.corners(torch.tensor([position]), torch.tensor([[0.0, 0, 0, 1]]), size)
+            assert core.inside_table(points, table, L.table_size).item()
+        assert abs(centers[0][1] - centers[1][1]) > sum(size[1] / 2 for size in L.box_sizes)
+
+
+def test_two_deliveries_require_both_empty_handed_returns(data):
+    state = core.RoundTripState(1, "cpu")
+    first = round_trip_data(data)
+    deliver(state, first)
+    assert state.delivered.tolist() == [[True, False]]
+    assert not state.done.item()
+    tick(state, first, 0.6)
+    assert state.phase.item() == 6, "Delivery alone is not a return"
+    first["root"][:, :2] = first["home"][:, :2]
+    first["all_hand_force"][:] = 1
+    tick(state, first, 0.6)
+    assert state.phase.item() == 6, "Returning while touching a box is not empty handed"
+    first["all_hand_force"][:] = 0
+    tick(state, first, 0.52)
+    assert state.phase.item() == 7
+    second = round_trip_data(data, 1)
+    deliver(state, second)
+    assert state.delivered.all()
+    assert not state.done.item(), "Both boxes delivered still requires the final return"
+    second["root"][:, :2] = second["home"][:, :2]
+    tick(state, second, 0.48)
+    assert not state.done.item()
+    tick(state, second, 0.04)
+    assert state.done.item() and state.phase.item() == 14
+    tick(state, second, 0.04)
+    assert state.bonus.item() == 0, "Completed trials cannot repeatedly earn the completion bonus"
+
+
+def test_previous_delivery_must_remain_supported(data):
+    state = core.RoundTripState(1, "cpu")
+    state.box_index[:] = 1
+    state.delivered[:, 0] = True
+    second = round_trip_data(data, 1)
+    second["all_supported"][:, 0] = False
+    tick(state, second, 0.44)
+    assert state.failed.item()
+    assert not state.done.item()
+
+
+def test_return_progress_cannot_be_farmed_by_retracing(data):
+    state = core.RoundTripState(1, "cpu")
+    state.leg.phase[:] = 6
+    state.delivered[:, 0] = True
+    d = round_trip_data(data)
+    d["all_supported"][:, 0] = True
+    d["root"][:, 0] = -1.2
+    state.update(d, 0.02)
+    d["root"][:, 0] += 0.05
+    state.update(d, 0.02)
+    gain = state.progress.clone()
+    d["root"][:, 0] -= 0.05
+    state.update(d, 0.02)
+    assert torch.allclose(gain + state.progress, torch.zeros(1), atol=1e-6)
+
+
+def test_round_trip_reset_clears_second_box_and_delivery_flags():
+    state = core.RoundTripState(2, "cpu")
+    state.box_index[:] = 1
+    state.delivered[:] = True
+    state.done[:] = True
+    state.reset([0])
+    assert state.box_index.tolist() == [0, 1]
+    assert state.done.tolist() == [False, True]
+    assert state.delivered.tolist() == [[False, False], [True, True]]

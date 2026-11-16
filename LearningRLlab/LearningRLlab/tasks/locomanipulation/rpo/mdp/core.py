@@ -17,7 +17,8 @@ def inverse_rotate(q, v):
 
 def corners(position, quaternion, size):
     signs = position.new_tensor([[x, y, z] for x in (-1, 1) for y in (-1, 1) for z in (-1, 1)])
-    local = signs * position.new_tensor(size) / 2
+    size = torch.as_tensor(size, device=position.device, dtype=position.dtype)
+    local = signs * size / 2 if size.ndim == 1 else signs[None] * size[:, None] / 2
     return position[:, None] + rotate(quaternion[:, None].expand(-1, 8, -1), local.expand(len(position), -1, -1))
 
 
@@ -60,7 +61,8 @@ class TransferState:
         p = self.phase.clone()
         if active is None:
             active = torch.ones_like(p, dtype=torch.bool)
-        points = corners(data["box"], data["quat"], layout.box_size)
+        size = data.get("size", data["box"].new_tensor(layout.box_size).expand_as(data["box"]))
+        points = corners(data["box"], data["quat"], size)
         bottom = points[..., 2].min(dim=1).values
         up = rotate(data["quat"], data["box"].new_tensor([0, 0, 1]).expand_as(data["box"]))[:, 2]
         near_source = torch.linalg.vector_norm(data["root"][:, :2] - data["source_stand"][:, :2], dim=-1) < 0.10
@@ -79,7 +81,7 @@ class TransferState:
             & slow
         )
         hand_local = inverse_rotate(data["quat"][:, None].expand(-1, 2, -1), data["hands"] - data["box"][:, None])
-        gap = (hand_local.abs() - data["box"].new_tensor(layout.box_size) / 2).clamp(min=0)
+        gap = (hand_local.abs() - size[:, None] / 2).clamp(min=0)
         released = (torch.linalg.vector_norm(gap, dim=-1) > layout.release_clearance).all(dim=1)
         released &= (data["hand_force"] < 0.1).all(dim=1)
         ready = (
@@ -135,4 +137,103 @@ class TransferState:
         self.progress[active] = progress[active]
         self.previous[active] = potential[active]
         self.initialized[active] = ~advance[active]
+        return self.phase
+
+
+class RoundTripState:
+    """One policy, two physical deliveries and two verified empty-handed returns.
+
+    Global phases 0..5 handle the small box, 6 returns home; 7..12 handle
+    the large box, 13 returns home; 14 is completion. No clock deadline.
+    """
+
+    def __init__(self, n, device, layout=LAYOUT):
+        self.leg = TransferState(n, device, layout)
+        self.box_index = torch.zeros(n, dtype=torch.long, device=device)
+        self.done = torch.zeros(n, dtype=torch.bool, device=device)
+        self.delivered = torch.zeros(n, 2, dtype=torch.bool, device=device)
+        self.return_hold = torch.zeros(n, device=device)
+        self.unstable = torch.zeros(n, device=device)
+        self.bonus = torch.zeros(n, device=device)
+        self.progress = torch.zeros(n, device=device)
+        self.return_previous = torch.zeros(n, device=device)
+        self.return_initialized = torch.zeros(n, dtype=torch.bool, device=device)
+
+    @property
+    def phase(self):
+        return torch.where(self.done, 14, 7 * self.box_index + self.leg.phase)
+
+    @property
+    def failed(self):
+        return self.leg.failed
+
+    @property
+    def hold(self):
+        return torch.where(self.leg.phase == 6, self.return_hold, self.leg.hold)
+
+    @property
+    def lost_contact(self):
+        return self.leg.lost_contact
+
+    @property
+    def supported(self):
+        return self.leg.supported
+
+    def reset(self, ids):
+        self.leg.reset(ids)
+        for value in (
+            self.box_index,
+            self.done,
+            self.delivered,
+            self.return_hold,
+            self.unstable,
+            self.bonus,
+            self.progress,
+            self.return_previous,
+            self.return_initialized,
+        ):
+            value[ids] = 0
+
+    def update(self, data, dt, active=None):
+        if active is None:
+            active = torch.ones_like(self.done)
+        self.bonus[active] = 0
+        self.progress[active] = 0
+        active = active & ~self.done & ~self.failed
+        returning = self.leg.phase == 6
+        old_phase = self.leg.phase.clone()
+        self.leg.update(data, dt, active & ~returning)
+        self.bonus[active] = torch.where(returning, 0.0, self.leg.bonus)[active]
+        self.progress[active] = torch.where(returning, 0.0, self.leg.progress)[active]
+        just_delivered = active & ~returning & (old_phase == 5) & (self.leg.phase == 6)
+        ids = just_delivered.nonzero(as_tuple=False).squeeze(-1)
+        self.delivered[ids, self.box_index[ids]] = True
+
+        # Never silently count a previously delivered box that has since fallen/moved.
+        all_supported = data["all_supported"]
+        valid = (~self.delivered | all_supported).all(dim=1)
+        unstable = torch.where(valid, 0.0, self.unstable + dt)
+        self.unstable[active] = unstable[active]
+        self.leg.failed[active] |= (unstable > 0.4)[active] | data["any_box_failed"][active]
+        distance = (data["root"][:, :2] - data["home"][:, :2]).norm(dim=-1)
+        empty_hands = (data["all_hand_force"] < 0.1).all(dim=(1, 2))
+        ready = (distance < 0.10) & (data["root_vel"][:, :2].norm(dim=-1) < 0.20) & empty_hands & valid
+        hold = torch.where(ready & returning, self.return_hold + dt, 0.0)
+        self.return_hold[active] = hold[active]
+        finish_return = active & returning & (hold >= 0.5) & ~self.failed
+        potential = -distance
+        progress = torch.where(self.return_initialized, potential - self.return_previous, 0.0)
+        self.progress[active & returning] = progress[active & returning]
+        self.return_previous[active] = potential[active]
+        self.return_initialized[active] = returning[active]
+        final = finish_return & (self.box_index == 1) & self.delivered.all(dim=1) & all_supported.all(dim=1)
+        self.done[final] = True
+        self.bonus[finish_return] = 10.0
+        self.bonus[final] += 50.0
+        next_box = finish_return & (self.box_index == 0)
+        next_ids = next_box.nonzero(as_tuple=False).squeeze(-1)
+        self.box_index[next_ids] = 1
+        self.leg.reset(next_ids)
+        self.return_hold[next_ids] = 0
+        self.return_initialized[next_ids] = False
         return self.phase

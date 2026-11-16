@@ -50,16 +50,29 @@ def build_scene():
             layout.table_parts(),
             "0.15 0.60 0.30 1",
         ),
-        ("Box", scene.source, layout.box_parts(), "0.65 0.42 0.20 1"),
+        (
+            "Box",
+            scene.sources[0],
+            layout.box_parts(size=scene.box_sizes[0]),
+            "0.65 0.42 0.20 1",
+        ),
+        (
+            "LargeBox",
+            scene.sources[1],
+            layout.box_parts(size=scene.box_sizes[1]),
+            "0.82 0.57 0.25 1",
+        ),
     ]:
         body = ET.SubElement(world, "body", name=name, pos=" ".join(map(str, pos)))
-        if name == "Box":
-            ET.SubElement(body, "freejoint", name="box_free")
+        if name in ("Box", "LargeBox"):
+            ET.SubElement(body, "freejoint", name=f"{name}_free")
         total_volume = sum(math.prod(size) for size, _ in parts)
         for index, (size, position) in enumerate(parts):
             mass = (
-                scene.box_mass * math.prod(size) / total_volume
-                if name == "Box"
+                scene.box_masses[0 if name == "Box" else 1]
+                * math.prod(size)
+                / total_volume
+                if name in ("Box", "LargeBox")
                 else 2.0
             )
             ET.SubElement(

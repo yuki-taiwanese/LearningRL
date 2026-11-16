@@ -34,7 +34,11 @@ def task_observation(env):
             inverse_rotate(yaw, d["dest_stand"] - d["root"]),
             inverse_rotate(yaw[:, None].expand(-1, 2, -1), d["hands"] - d["root"][:, None]).flatten(1),
             (d["hand_force"] / 10).clamp(max=5),
-            torch.nn.functional.one_hot(term.state.phase, 7).float(),
+            torch.nn.functional.one_hot(term.state.phase, 15).float(),
+            d["size"],
+            term.state.delivered.float(),
+            inverse_rotate(yaw, d["home"] - d["root"]),
+            inverse_rotate(yaw[:, None].expand(-1, 2, -1), d["all_boxes"] - d["root"][:, None]).flatten(1),
             term.state.hold[:, None],
             term.state.lost_contact[:, None],
             term.state.supported[:, None].float(),
@@ -47,11 +51,11 @@ def task_reward(env):
     term = transfer(env)
     s = term.state
     # RewardManager multiplies rates by step_dt: event rewards are divided by dt exactly once.
-    return (s.bonus + 8.0 * s.progress) / env.step_dt - 0.40
+    return (s.bonus + 8.0 * s.progress) / env.step_dt
 
 
 def task_success(env):
-    return transfer(env).state.phase == 6
+    return transfer(env).state.done
 
 
 def task_failure(env):
@@ -67,7 +71,6 @@ def reset_task(env, env_ids, approach_distance=1.0):
         env_ids = torch.arange(env.num_envs, device=env.device)
     layout = LAYOUT
     robot = env.scene["robot"]
-    box = env.scene["box"]
     origins = env.scene.env_origins[env_ids]
     state = robot.data.default_root_state.torch[env_ids].clone()
     state[:, :3] = origins + state.new_tensor([layout.stand_x - approach_distance, layout.table_y, 0.75])
@@ -75,9 +78,11 @@ def reset_task(env, env_ids, approach_distance=1.0):
     state[:, 7:] = 0
     robot.write_root_pose_to_sim(state[:, :7], env_ids=env_ids)
     robot.write_root_velocity_to_sim(state[:, 7:], env_ids=env_ids)
-    state = box.data.default_root_state.torch[env_ids].clone()
-    state[:, :3] = origins + state.new_tensor(layout.source)
-    state[:, 3:7] = state.new_tensor([0, 0, 0, 1])
-    state[:, 7:] = 0
-    box.write_root_pose_to_sim(state[:, :7], env_ids=env_ids)
-    box.write_root_velocity_to_sim(state[:, 7:], env_ids=env_ids)
+    for index, name in enumerate(("box", "large_box")):
+        box = env.scene[name]
+        state = box.data.default_root_state.torch[env_ids].clone()
+        state[:, :3] = origins + state.new_tensor(layout.sources[index])
+        state[:, 3:7] = state.new_tensor([0, 0, 0, 1])
+        state[:, 7:] = 0
+        box.write_root_pose_to_sim(state[:, :7], env_ids=env_ids)
+        box.write_root_velocity_to_sim(state[:, 7:], env_ids=env_ids)
