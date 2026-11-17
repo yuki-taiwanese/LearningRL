@@ -48,3 +48,13 @@ env.rewards.track_ang_vel_z.params.std=0.25
 ```
 
 These change reward shaping, not the physical robot, command ranges, observations or termination rules. The baseline checkpoint remains preserved. The continuation must pass the same independent movement evaluation before it is described as a walking skill.
+
+## Forward-only curriculum
+
+`LearningRL-RPO-ForwardWalk-v0` / `-PLAY` is the next isolated curriculum stage. Commands request only +0.15 to +0.25 m/s forward, with zero lateral/yaw velocity and no standing-command samples. It preserves the 78/81 actor/critic schema and original physical robot, and has its own checkpoint family `learningrl_rpo_forward_walk`.
+
+Linear tracking has weight 3 and standard deviation 0.12 m/s; yaw tracking has weight 1.5 and standard deviation 0.25 rad/s. A signed, bounded forward-speed reward has weight 1: standing earns zero, backward movement is negative, and speed above the target cannot earn extra reward from this term. Action-rate penalty weight is -0.02; balance, height and other walking terms remain active. No external force or kinematic assistance is applied.
+
+`notebooks/RPO_Forward_Curriculum.ipynb` supports up to four 500-update chunks with 512 environments, checkpoint backups every 50 updates, and an independent five-trial evaluation after each chunk. It resumes the latest forward-family backup and preserves every run. Its internal one-meter gate requires survival, forward speed, low lateral/yaw drift and tracking error; passing that gate still requires visual gait review.
+
+The evaluation checks that commanded velocities appear at the actor inputs and that commands change its outputs. It records root and joint states, then makes a clearly labelled CPU kinematic replay; replay does not run a second physics simulation. The old balance policy passed this command audit while still moving negligibly. Long training outcomes must be read from the new evaluation files, not inferred from this audit.
