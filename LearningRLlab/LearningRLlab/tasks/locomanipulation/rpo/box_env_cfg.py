@@ -1,7 +1,6 @@
 """RPO delivers two differently sized boxes, returning left after each delivery."""
 
-import os
-from pathlib import Path
+from robot_description.robots.cached_usd import use_cached_rpo_usd
 
 import isaaclab.sim as sim_utils
 from isaaclab.assets import RigidObjectCfg
@@ -96,22 +95,7 @@ class RPOBoxTransferEnvCfg(LearningRLRPOWalkEnvCfg):
 
     def __post_init__(self):
         super().__post_init__()
-        # Optional kit-less training after the course URDF importer has produced
-        # its inertia-corrected USD. Preserve its authored physics variant.
-        cached_usd = os.environ.get("LEARNINGRL_RPO_USD")
-        if cached_usd:
-            if not Path(cached_usd).is_file():
-                raise FileNotFoundError(f"Preconverted RPO model not found: {cached_usd}")
-            source = self.scene.robot.spawn
-            self.scene.robot.spawn = sim_utils.UsdFileCfg(
-                usd_path=cached_usd,
-                activate_contact_sensors=source.activate_contact_sensors,
-                rigid_props=source.rigid_props,
-                articulation_props=source.articulation_props,
-                joint_drive_props=source.joint_drive_props,
-                collision_props=source.collision_props,
-                mass_props=source.mass_props,
-            )
+        use_cached_rpo_usd(self.scene.robot)
         self.episode_length_s = LAYOUT.episode_seconds
         self.commands.base_velocity = TransferCommandCfg()
         self.scene.box_contact.update_period = self.sim.dt
