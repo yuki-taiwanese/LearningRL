@@ -5,6 +5,28 @@ import gymnasium as gym
 from . import agents
 
 gym.register(
+    id="LearningRL-RPO-AlternatingWalk-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.alternating_walk_env_cfg:RPOAlternatingWalkEnvCfg",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.alternating_walk_ppo_cfg:RPOAlternatingWalkPPORunnerCfg",
+        "default_agent": "rsl_rl",
+    },
+)
+
+gym.register(
+    id="LearningRL-RPO-AlternatingWalk-v0-PLAY",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.alternating_walk_env_cfg:RPOAlternatingWalkEnvCfg_PLAY",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.alternating_walk_ppo_cfg:RPOAlternatingWalkPPORunnerCfg",
+        "default_agent": "rsl_rl",
+    },
+)
+
+gym.register(
     id="LearningRL-RPO-ForwardWalk-v0",
     entry_point="isaaclab.envs:ManagerBasedRLEnv",
     disable_env_checker=True,
