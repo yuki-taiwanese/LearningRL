@@ -31,3 +31,20 @@ Box grasp/place verification and the original actor's box measurements remain si
 - Copy newly completed checkpoints to the authorized group Drive while training, verify hashes, and preserve logs and configuration.
 - Judge walking using falls, sustained episode duration, command tracking and independent rollouts; a higher training reward alone does not establish success.
 - Do not claim a complete two-box behavior until all deliveries and both empty-handed returns have been evaluated together.
+
+## Reproducible Colab continuation
+
+`notebooks/RPO_Modular_Training.ipynb` installs the pinned environment and resumes the newest backed-up unloaded-walking checkpoint. Training is disabled by default. It includes a frozen-policy evaluation with actual body velocity, path length, displacement and first termination, so standing still cannot be mistaken for successful walking.
+
+The first 500-update flat-walk run learned balance: all five 10-second nominal trials survived, but the actual phase velocities were near zero and net displacement was only 0.8–1.3 cm. Its approximately 0.152 m/s velocity error was comparable to the 0.150 m/s stationary reference. It did not establish command-following locomotion.
+
+A controlled continuation uses explicit Hydra overrides, preserved in each run's `round.json` and configuration:
+
+```text
+env.rewards.track_lin_vel_xy.weight=3.0
+env.rewards.track_lin_vel_xy.params.std=0.15
+env.rewards.track_ang_vel_z.weight=1.5
+env.rewards.track_ang_vel_z.params.std=0.25
+```
+
+These change reward shaping, not the physical robot, command ranges, observations or termination rules. The baseline checkpoint remains preserved. The continuation must pass the same independent movement evaluation before it is described as a walking skill.
